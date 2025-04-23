@@ -1,0 +1,103 @@
+import os
+import argparse
+import pytesseract
+from pdf2image import convert_from_path
+from PIL import Image
+from sentence_transformers import SentenceTransformer, util
+import re
+
+def ocr_pdf(pdf_path, temp_dir="temp_images"):
+    """
+    Performs OCR on a PDF document and returns the extracted text.
+    """
+    try:
+        images = convert_from_path(pdf_path)
+        text = ""
+        for i, image in enumerate(images):
+            image_path = os.path.join(temp_dir, f"page_{i}.png")
+            image.save(image_path, "PNG")
+            text += pytesseract.image_to_string(Image.open(image_path)) + "\n"
+        return text
+    except Exception as e:
+        print(f"Error processing {pdf_path}: {e}")
+        return ""
+
+def keyword_search(text, keyword):
+    """
+    Performs keyword search on the extracted text.
+    """
+    matches = re.finditer(re.escape(keyword), text, re.IGNORECASE)
+    return [match.start() for match in matches]
+
+def semantic_search(text, query, model):
+    """
+    Performs semantic search on the extracted text.
+    """
+    sentences = text.split('\n')
+    sentences = [s.strip() for s in sentences if s.strip()]  # Remove empty lines
+    if not sentences:
+        return []
+
+    query_embedding = model.encode(query, convert_to_tensor=True)
+    sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
+
+    cosine_scores = util.cos_sim(query_embedding, sentence_embeddings)[0]
+    sentence_scores = list(zip(sentences, cosine_scores.tolist()))
+    sentence_scores = sorted(sentence_scores, key=lambda x: x[1], reverse=True)
+
+    return sentence_scores
+
+def process_directory(directory, keyword=None, semantic_query=None):
+    """
+    Processes all PDF documents in a directory.
+    """
+    results = {}
+    os.makedirs("temp_images", exist_ok=True)
+    model = None
+    if semantic_query:
+        model = SentenceTransformer('all-mpnet-base-v2')
+
+    for filename in os.listdir(directory):
+        if filename.lower().endswith(".pdf"):
+            pdf_path = os.path.join(directory, filename)
+            text = ocr_pdf(pdf_path)
+            if text:
+                results[filename] = {}
+                if keyword:
+                    results[filename]["keyword_matches"] = keyword_search(text, keyword)
+                if semantic_query:
+                    results[filename]["semantic_matches"] = semantic_search(text, semantic_query, model)
+
+    #cleanup temp images
+    for filename in os.listdir("temp_images"):
+        os.remove(os.path.join("temp_images",filename))
+    os.rmdir("temp_images")
+
+    return results
+
+def main():
+    """
+    Main function to handle command-line arguments and process the directory.
+    """
+    parser = argparse.ArgumentParser(description="OCR PDF documents and perform keyword/semantic searches.")
+    parser.add_argument("directory", help="Directory containing PDF documents.")
+    parser.add_argument("--keyword", help="Keyword to search for.")
+    parser.add_argument("--semantic", help="Semantic query to search for.")
+
+    args = parser.parse_args()
+
+    results = process_directory(args.directory, args.keyword, args.semantic)
+
+    for filename, matches in results.items():
+        print(f"\nResults for {filename}:")
+        if "keyword_matches" in matches:
+            print(f"  Keyword matches: {matches['keyword_matches']}")
+        if "semantic_matches" in matches:
+            print("  Semantic matches:")
+            for sentence, score in matches["semantic_matches"][:5]: #show top 5
+                print(f"    Score: {score:.4f}, Sentence: {sentence}")
+        if not matches:
+            print("No matches found")
+
+if __name__ == "__main__":
+    main()
